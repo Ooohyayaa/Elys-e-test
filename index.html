@@ -303,25 +303,28 @@ function prepareCoinBuffer(){
  }catch(err){console.warn('Initialisation audio pièces',err);coinDecodePromise=Promise.resolve(null);}
  return coinDecodePromise;
 }
+// Pièces : synthèse Web Audio directe, sans MP3 ni clone HTMLAudio.
+// Une nouvelle source indépendante est créée à chaque ramassage.
 function playCoin(){
- if(audioCtx&&coinBuffer){
-  try{
-   if(audioCtx.state==='suspended')audioCtx.resume().catch(()=>{});
-   const source=audioCtx.createBufferSource(),gain=audioCtx.createGain();
-   source.buffer=coinBuffer;gain.gain.value=.23;
-   source.connect(gain);gain.connect(audioCtx.destination);
-   activeCoinNodes.add(source);
-   source.onended=()=>{activeCoinNodes.delete(source);source.disconnect();gain.disconnect();};
-   source.start();return;
-  }catch(err){console.warn('Lecture Web Audio pièce',err);}
- }
- // Secours pendant le premier décodage ou si Web Audio est indisponible.
- const sound=fxAudio.coin.cloneNode(true);
- sound.volume=.23;sound.muted=false;
- activeCoinSounds.add(sound);
- const cleanup=()=>{activeCoinSounds.delete(sound);sound.onended=null;sound.onerror=null;};
- sound.onended=cleanup;sound.onerror=cleanup;
- try{const promise=sound.play();if(promise)promise.catch(cleanup);}catch(err){cleanup();}
+ try{
+  audioCtx??=new (window.AudioContext||window.webkitAudioContext)();
+  if(audioCtx.state!=='running'){
+   audioCtx.resume().catch(()=>{});
+  }
+  const now=audioCtx.currentTime;
+  const gain=audioCtx.createGain();
+  gain.gain.setValueAtTime(0.0001,now);
+  gain.gain.exponentialRampToValueAtTime(0.18,now+0.012);
+  gain.gain.exponentialRampToValueAtTime(0.0001,now+0.19);
+  gain.connect(audioCtx.destination);
+  const osc=audioCtx.createOscillator();
+  osc.type='sine';
+  osc.frequency.setValueAtTime(880,now);
+  osc.frequency.setValueAtTime(1175,now+0.065);
+  osc.connect(gain);
+  osc.onended=()=>{try{osc.disconnect();gain.disconnect();}catch(e){}};
+  osc.start(now);osc.stop(now+0.2);
+ }catch(err){console.warn('Son pièce Web Audio',err);}
 }
 function playFx(name){
  const a=fxAudio[name];if(!a)return;
@@ -335,7 +338,7 @@ function playTrack(track){
   const promise=track.play();
   if(promise)promise.catch(()=>{console.warn('Musique bloquée jusqu’à une interaction')});
 }
-function startMusic(){setupAudio();prepareCoinBuffer();playTrack(backgroundMusic);startCrowd();}
+function startMusic(){setupAudio();playTrack(backgroundMusic);startCrowd();}
 function startMenuMusic(){menuMusic.muted=false;menuMusic.volume=.21;fxAudio.crowd.pause();playTrack(menuMusic);}
 // Les navigateurs mobiles exigent un premier geste pour démarrer l'audio.
 for(const eventName of ['pointerdown','pointerup','keydown']){
