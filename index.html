@@ -303,27 +303,25 @@ function prepareCoinBuffer(){
  }catch(err){console.warn('Initialisation audio pièces',err);coinDecodePromise=Promise.resolve(null);}
  return coinDecodePromise;
 }
-// Pièces : synthèse Web Audio directe, sans MP3 ni clone HTMLAudio.
-// Une nouvelle source indépendante est créée à chaque ramassage.
-function playCoin(){
+// Pièces : lecture du vrai son décodé via Web Audio.
+// Attend explicitement la reprise du contexte avant toute lecture.
+let coinRequest=0;
+async function playCoin(){
  try{
   audioCtx??=new (window.AudioContext||window.webkitAudioContext)();
-  if(audioCtx.state!=='running'){
-   audioCtx.resume().catch(()=>{});
-  }
-  const now=audioCtx.currentTime;
-  const gain=audioCtx.createGain();
-  gain.gain.setValueAtTime(0.0001,now);
-  gain.gain.exponentialRampToValueAtTime(0.18,now+0.012);
-  gain.gain.exponentialRampToValueAtTime(0.0001,now+0.19);
-  gain.connect(audioCtx.destination);
-  const osc=audioCtx.createOscillator();
-  osc.type='sine';
-  osc.frequency.setValueAtTime(880,now);
-  osc.frequency.setValueAtTime(1175,now+0.065);
-  osc.connect(gain);
-  osc.onended=()=>{try{osc.disconnect();gain.disconnect();}catch(e){}};
-  osc.start(now);osc.stop(now+0.2);
+  const ctx=audioCtx;
+  if(ctx.state!== 'running') await ctx.resume();
+  if(ctx.state!== 'running') return;
+  const buffer=coinBuffer || await prepareCoinBuffer();
+  if(!buffer || ctx.state!== 'running') return;
+  const source=ctx.createBufferSource();
+  const gain=ctx.createGain();
+  source.buffer=buffer;
+  gain.gain.value=.23;
+  source.connect(gain).connect(ctx.destination);
+  activeCoinNodes.add(source);
+  source.onended=()=>{activeCoinNodes.delete(source);try{source.disconnect();gain.disconnect();}catch(e){}};
+  source.start();
  }catch(err){console.warn('Son pièce Web Audio',err);}
 }
 function playFx(name){
@@ -342,7 +340,7 @@ function startMusic(){setupAudio();playTrack(backgroundMusic);startCrowd();}
 function startMenuMusic(){menuMusic.muted=false;menuMusic.volume=.21;fxAudio.crowd.pause();playTrack(menuMusic);}
 // Les navigateurs mobiles exigent un premier geste pour démarrer l'audio.
 for(const eventName of ['pointerdown','pointerup','keydown']){
- document.addEventListener(eventName,()=>{setupAudio();prepareCoinBuffer();
+ document.addEventListener(eventName,()=>{setupAudio();try{audioCtx??=new (window.AudioContext||window.webkitAudioContext)();if(audioCtx.state!=='running')audioCtx.resume().catch(()=>{});}catch(e){}prepareCoinBuffer();
   if(document.querySelector('#menu').style.display!=='none' && menuMusic.paused && backgroundMusic.paused)startMenuMusic();
  },{passive:true});
 }
@@ -448,23 +446,9 @@ document.querySelectorAll('.char').forEach(b=>b.onclick=()=>{playSelection(b.dat
 // Sur téléphone, chaque son doit avoir été lancé au moins une fois depuis un geste du joueur
 // (toucher). Sinon les sons déclenchés ensuite par le jeu lui-même (pièces, répliques,
 // bonus, mort) sont refusés en silence. On « réveille » donc chaque son en muet au premier toucher.
-let _audioUnlocked=new WeakSet();
-function unlockAudio(){
- const list=[...coinPlayers,fxAudio.death,fxAudio.bonus49,...Object.values(heartVoices),marineBonusSound,melenchonExtra,clipMelenchon];
- for(const a of list){
-  if(!a||_audioUnlocked.has(a)||!a.paused)continue;
-  _audioUnlocked.add(a);
-  const wasMuted=a.muted;
-  a.muted=true;
-  const finish=()=>{try{a.pause();a.currentTime=0;}catch(e){}a.muted=wasMuted;};
-  const fail=()=>{_audioUnlocked.delete(a);a.muted=wasMuted;};
-  try{const p=a.play();if(p&&p.then)p.then(finish,fail);else finish();}catch(e){fail();}
- }
-}
-for(const ev of ['touchend','pointerup','click'])document.addEventListener(ev,unlockAudio,{passive:true});
-// Après un retour d'application, on refait un déblocage au prochain toucher.
-document.addEventListener('visibilitychange',()=>{if(!document.hidden)_audioUnlocked=new WeakSet();});
-function begin(){for(const sound of Object.values(selectionSounds))sound.pause();clearTimeout(selectionTimeout);setupAudio();try{audioCtx??=new (window.AudioContext||window.webkitAudioContext)();audioCtx.resume();}catch(e){}nickname=document.querySelector('#nickname').value.trim();if(nickname.length<3){document.querySelector('#nameError').textContent='Entre un pseudo de 3 caractères minimum.';document.querySelector('#menu').style.display='grid';return;}try{fxAudio.bonus49.load();heartVoices[selected]?.load();}catch(e){}unlockAudio();startMusic();localStorage.setItem('elysee_nickname',nickname);document.querySelector('#nameError').textContent='';document.querySelector('#menu').style.display='none';document.querySelector('#gameover').style.display='none';for(const o of obstacles)scene.remove(o);obstacles.length=0;for(const b of bonuses)scene.remove(b);bonuses.length=0;lives=2;immune=0;power=0;heartSpawn=27+Math.random()*20;heartsCollected=0;for(const h of hearts)scene.remove(h);hearts.length=0;coins=0;nextKm=1000;coinSpawn=.6;document.querySelector('#coinsCount').textContent=0;document.querySelector('#powerHud').textContent='';for(const c of collectibles)scene.remove(c);collectibles.length=0;paused=false;bonusSpawn=16+Math.random()*5;musicTimer=0;musicStep=0;bonusMusicStep=0;updateLives();document.querySelector('#pauseBtn').style.display='block';document.querySelector('#pauseMenu').style.display='none';score=0;runElapsed=0;hintShown=true;document.querySelector('#hint').classList.add('show');document.querySelector('#hint').classList.remove('fade');speed=15;spawn=1.15;playerLane=1;jumpY=0;vy=0;slideT=0;queuedSlide=false;runPhase=0;dead=false;running=true;sfx(660,.12);player.position.set(0,0,4);document.querySelector('#score').textContent='0';}
+// Ne jamais lancer les effets sonores pour les « débloquer » :
+// Safari peut les rendre audibles avec un décalage.
+function begin(){for(const sound of Object.values(selectionSounds))sound.pause();clearTimeout(selectionTimeout);setupAudio();try{audioCtx??=new (window.AudioContext||window.webkitAudioContext)();audioCtx.resume();}catch(e){}nickname=document.querySelector('#nickname').value.trim();if(nickname.length<3){document.querySelector('#nameError').textContent='Entre un pseudo de 3 caractères minimum.';document.querySelector('#menu').style.display='grid';return;}try{fxAudio.bonus49.load();heartVoices[selected]?.load();}catch(e){}startMusic();localStorage.setItem('elysee_nickname',nickname);document.querySelector('#nameError').textContent='';document.querySelector('#menu').style.display='none';document.querySelector('#gameover').style.display='none';for(const o of obstacles)scene.remove(o);obstacles.length=0;for(const b of bonuses)scene.remove(b);bonuses.length=0;lives=2;immune=0;power=0;heartSpawn=27+Math.random()*20;heartsCollected=0;for(const h of hearts)scene.remove(h);hearts.length=0;coins=0;nextKm=1000;coinSpawn=.6;document.querySelector('#coinsCount').textContent=0;document.querySelector('#powerHud').textContent='';for(const c of collectibles)scene.remove(c);collectibles.length=0;paused=false;bonusSpawn=16+Math.random()*5;musicTimer=0;musicStep=0;bonusMusicStep=0;updateLives();document.querySelector('#pauseBtn').style.display='block';document.querySelector('#pauseMenu').style.display='none';score=0;runElapsed=0;hintShown=true;document.querySelector('#hint').classList.add('show');document.querySelector('#hint').classList.remove('fade');speed=15;spawn=1.15;playerLane=1;jumpY=0;vy=0;slideT=0;queuedSlide=false;runPhase=0;dead=false;running=true;sfx(660,.12);player.position.set(0,0,4);document.querySelector('#score').textContent='0';}
 document.querySelector('#start').onclick=begin;document.querySelector('#again').onclick=begin;
 document.querySelector('#mainMenu').onclick=()=>{backgroundMusic.pause();stopFx();startMenuMusic();running=false;dead=false;paused=false;clipMelenchon.pause();speechSynthesis.cancel();document.querySelector('#gameover').style.display='none';document.querySelector('#pauseMenu').style.display='none';document.querySelector('#pauseBtn').style.display='none';document.querySelector('#menu').style.display='grid';};
 function end(){backgroundMusic.pause();stopFx();playFx('death');if(selected!=='melenchon')voice(['La partie est terminée !','La République est bloquée !','Quel désastre !'][Math.floor(Math.random()*3)]);document.querySelector('#pauseBtn').style.display='none';running=false;dead=true;best=Math.max(best,Math.floor(score));localStorage.setItem('lf_best',best);document.querySelector('#best').textContent=best;document.querySelector('#result').textContent=`${Math.floor(score)} mètres · ${coins} pièces · Record : ${best} m.`;const records=JSON.parse(localStorage.getItem('elysee_records')||'[]');const previous=records.find(r=>r.name===nickname);if(!previous||Math.floor(score)>previous.score){const filtered=records.filter(r=>r.name!==nickname);filtered.push({name:nickname,score:Math.floor(score)});filtered.sort((a,b)=>b.score-a.score);localStorage.setItem('elysee_records',JSON.stringify(filtered.slice(0,10)))}localLeaderboard();document.querySelector('#gameover').style.display='grid'}
